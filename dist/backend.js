@@ -8,6 +8,44 @@ var STYLE_TAGS = {
 };
 var sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 var ENCLAVE_KEY = "pollinations_api_key";
+function looksLikeBooruTags(prompt) {
+  const fragments = prompt.split(",").map((f) => f.trim()).filter(Boolean);
+  if (fragments.length < 2)
+    return false;
+  const tagLike = fragments.filter((f) => !/\s/.test(f) || f.split(" ").length <= 2);
+  return tagLike.length / fragments.length > 0.6;
+}
+async function normalizePrompt(prompt, resolvedKey) {
+  if (!looksLikeBooruTags(prompt))
+    return prompt;
+  try {
+    const response = await fetch("https://gen.pollinations.ai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${resolvedKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "openai",
+        temperature: 0.3,
+        messages: [
+          {
+            role: "system",
+            content: "Rewrite Danbooru/booru-style comma-separated image tags as a single natural-language image description. Keep every visual detail from the tags. Output only the rewritten description, no preamble, no quotes."
+          },
+          { role: "user", content: prompt }
+        ]
+      })
+    });
+    if (!response.ok)
+      return prompt;
+    const data = await response.json();
+    const rewritten = data?.choices?.[0]?.message?.content?.trim();
+    return rewritten || prompt;
+  } catch {
+    return prompt;
+  }
+}
 async function resolveApiKey(request, userId) {
   if (request.apiKey) {
     await spindle.enclave.put(ENCLAVE_KEY, request.apiKey, userId);
@@ -22,7 +60,7 @@ async function generateOne(request, index, userId, resolvedKey) {
   const finalPrompt = `${request.prompt.trim()}, ${STYLE_TAGS[request.style]}`;
   const seed = Number.isFinite(request.seed) ? Number(request.seed) : Math.floor(Math.random() * 1e9) + index;
   const url = new URL("https://image.pollinations.ai/prompt/" + encodeURIComponent(finalPrompt));
-  url.searchParams.set("model", "flux");
+  url.searchParams.set("model", "kontext");
   url.searchParams.set("seed", String(seed));
   url.searchParams.set("nologo", "true");
   url.searchParams.set("private", "true");
@@ -87,10 +125,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
   try {
     const count = Math.max(1, Math.min(6, Number(raw.request.count || 1)));
     const resolvedKey = await resolveApiKey(raw.request, userId);
+    const normalizedPrompt = await normalizePrompt(raw.request.prompt.trim(), resolvedKey);
+    const generateRequest = { ...raw.request, prompt: normalizedPrompt };
     spindle.sendToFrontend({ type: "perflux:status", status: "loading", count }, userId);
     const images = [];
     for (let index = 0;index < count; index++) {
-      const image = await generateOneWithRetry(raw.request, index, userId, resolvedKey);
+      const image = await generateOneWithRetry(generateRequest, index, userId, resolvedKey);
       images.push(image);
       spindle.sendToFrontend({ type: "perflux:progress", completed: index + 1, count }, userId);
       if (index < count - 1)

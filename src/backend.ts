@@ -24,6 +24,55 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const ENCLAVE_KEY = 'pollinations_api_key'
 
+// Rough heuristic for "this looks like booru tags, not a sentence": mostly
+// short comma-separated fragments, snake_case or single words, no real
+// sentence structure. False positives just get sent through the rewrite step
+// harmlessly (a natural-language prompt rewritten as itself costs a bit of
+// pollen but doesn't break anything).
+function looksLikeBooruTags(prompt: string): boolean {
+  const fragments = prompt.split(',').map((f) => f.trim()).filter(Boolean)
+  if (fragments.length < 2) return false
+  const tagLike = fragments.filter((f) => !/\s/.test(f) || f.split(' ').length <= 2)
+  return tagLike.length / fragments.length > 0.6
+}
+
+// Uses Pollinations' own text model to turn booru-tag prompts into a plain-
+// language description before they hit an image model that doesn't speak
+// tag syntax. Runs once per generate request, not once per image.
+async function normalizePrompt(prompt: string, resolvedKey: string): Promise<string> {
+  if (!looksLikeBooruTags(prompt)) return prompt
+
+  try {
+    const response = await fetch('https://gen.pollinations.ai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${resolvedKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'openai',
+        temperature: 0.3,
+        messages: [
+          {
+            role: 'system',
+            content: 'Rewrite Danbooru/booru-style comma-separated image tags as a single natural-language image description. Keep every visual detail from the tags. Output only the rewritten description, no preamble, no quotes.'
+          },
+          { role: 'user', content: prompt }
+        ]
+      })
+    })
+
+    if (!response.ok) return prompt
+    const data: any = await response.json()
+    const rewritten = data?.choices?.[0]?.message?.content?.trim()
+    return rewritten || prompt
+  } catch {
+    // If the rewrite call fails for any reason, fall back to the raw prompt
+    // rather than blocking generation entirely.
+    return prompt
+  }
+}
+
 // Reads the key from the Secure Enclave (per-user encrypted store). Falls back
 // to persisting a key sent from the frontend settings field, if provided, so
 // the first save also works without a separate round trip.
@@ -49,7 +98,7 @@ async function generateOne(
     : Math.floor(Math.random() * 1000000000) + index
 
   const url = new URL('https://image.pollinations.ai/prompt/' + encodeURIComponent(finalPrompt))
-  url.searchParams.set('model', 'flux')
+  url.searchParams.set('model', 'kontext')
   url.searchParams.set('seed', String(seed))
   url.searchParams.set('nologo', 'true')
   url.searchParams.set('private', 'true')
@@ -133,6 +182,8 @@ spindle.onFrontendMessage(async (raw: FrontendEnvelope | SaveKeyEnvelope | Check
   try {
     const count = Math.max(1, Math.min(6, Number(raw.request.count || 1)))
     const resolvedKey = await resolveApiKey(raw.request, userId)
+    const normalizedPrompt = await normalizePrompt(raw.request.prompt.trim(), resolvedKey)
+    const generateRequest: GenerateRequest = { ...raw.request, prompt: normalizedPrompt }
 
     spindle.sendToFrontend({ type: 'perflux:status', status: 'loading', count }, userId)
 
@@ -140,7 +191,7 @@ spindle.onFrontendMessage(async (raw: FrontendEnvelope | SaveKeyEnvelope | Check
     // A small gap between calls on top of the retry/backoff gives extra headroom.
     const images = []
     for (let index = 0; index < count; index++) {
-      const image = await generateOneWithRetry(raw.request, index, userId, resolvedKey)
+      const image = await generateOneWithRetry(generateRequest, index, userId, resolvedKey)
       images.push(image)
       spindle.sendToFrontend({ type: 'perflux:progress', completed: index + 1, count }, userId)
       if (index < count - 1) await sleep(500)
@@ -154,4 +205,3 @@ spindle.onFrontendMessage(async (raw: FrontendEnvelope | SaveKeyEnvelope | Check
     }, userId)
   }
 })
-
