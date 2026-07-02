@@ -1,0 +1,106 @@
+// @bun
+// src/backend.ts
+var STYLE_TAGS = {
+  "Photo-realistic": "photorealistic, ultra-detailed, realistic lighting",
+  vintage: "vintage style, retro tones, nostalgic aesthetic",
+  "3d": "3d render, volumetric lighting, highly detailed",
+  cartoon: "cartoon style, illustrated, bold outlines"
+};
+var sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+var ENCLAVE_KEY = "pollinations_api_key";
+async function resolveApiKey(request, userId) {
+  if (request.apiKey) {
+    await spindle.enclave.put(ENCLAVE_KEY, request.apiKey, userId);
+    return request.apiKey;
+  }
+  const stored = await spindle.enclave.get(ENCLAVE_KEY, userId);
+  if (stored)
+    return stored;
+  throw new Error("No Pollinations API key saved yet. Add one in PerFlux settings.");
+}
+async function generateOne(request, index, userId, resolvedKey) {
+  const finalPrompt = `${request.prompt.trim()}, ${STYLE_TAGS[request.style]}`;
+  const seed = Number.isFinite(request.seed) ? Number(request.seed) : Math.floor(Math.random() * 1e9) + index;
+  const url = new URL("https://image.pollinations.ai/prompt/" + encodeURIComponent(finalPrompt));
+  url.searchParams.set("model", "flux");
+  url.searchParams.set("seed", String(seed));
+  url.searchParams.set("nologo", "true");
+  url.searchParams.set("private", "true");
+  url.searchParams.set("enhance", "false");
+  url.searchParams.set("safe", "false");
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${resolvedKey}`,
+      Accept: "image/jpeg"
+    }
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    const err = new Error(`Pollinations request failed (${response.status}): ${detail || response.statusText}`);
+    err.status = response.status;
+    throw err;
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  let binary = "";
+  for (let i = 0;i < bytes.length; i++)
+    binary += String.fromCharCode(bytes[i]);
+  const base64 = btoa(binary);
+  const mimeType = response.headers.get("content-type") || "image/jpeg";
+  return {
+    index,
+    seed,
+    prompt: finalPrompt,
+    mimeType,
+    dataUrl: `data:${mimeType};base64,${base64}`
+  };
+}
+async function generateOneWithRetry(request, index, userId, resolvedKey, retries = 4, baseDelay = 2000) {
+  try {
+    return await generateOne(request, index, userId, resolvedKey);
+  } catch (error) {
+    if (error?.status === 429 && retries > 0) {
+      const jitter = Math.random() * 1000;
+      const delay = baseDelay + jitter;
+      spindle.log?.warn?.(`Rate limited on image ${index}, retrying in ${(delay / 1000).toFixed(1)}s`);
+      await sleep(delay);
+      return generateOneWithRetry(request, index, userId, resolvedKey, retries - 1, baseDelay * 2);
+    }
+    throw error;
+  }
+}
+spindle.onFrontendMessage(async (raw, userId) => {
+  if (!raw)
+    return;
+  if (raw.type === "perflux:save-key") {
+    await spindle.enclave.put(ENCLAVE_KEY, raw.apiKey, userId);
+    spindle.sendToFrontend({ type: "perflux:key-saved" }, userId);
+    return;
+  }
+  if (raw.type === "perflux:check-key") {
+    const hasKey = await spindle.enclave.has(ENCLAVE_KEY, userId);
+    spindle.sendToFrontend({ type: "perflux:key-status", hasKey }, userId);
+    return;
+  }
+  if (raw.type !== "perflux:generate")
+    return;
+  try {
+    const count = Math.max(1, Math.min(6, Number(raw.request.count || 1)));
+    const resolvedKey = await resolveApiKey(raw.request, userId);
+    spindle.sendToFrontend({ type: "perflux:status", status: "loading", count }, userId);
+    const images = [];
+    for (let index = 0;index < count; index++) {
+      const image = await generateOneWithRetry(raw.request, index, userId, resolvedKey);
+      images.push(image);
+      spindle.sendToFrontend({ type: "perflux:progress", completed: index + 1, count }, userId);
+      if (index < count - 1)
+        await sleep(500);
+    }
+    spindle.sendToFrontend({ type: "perflux:results", images }, userId);
+  } catch (error) {
+    spindle.sendToFrontend({
+      type: "perflux:error",
+      message: error?.message || "Image generation failed."
+    }, userId);
+  }
+});

@@ -1,0 +1,14 @@
+{
+  "version": "1.0.0",
+  "name": "PerFlux",
+  "identifier": "perflux",
+  "author": "SimpleFan",
+  "github": "https://github.com/odieo1/perflux",
+  "homepage": "https://github.com/odieo1/perflux",
+  "description": "Lumiverse Spindle extension that adds a PerFlux image generation tab backed by Pollinations.",
+  "permissions": [],
+  "requested_capabilities": ["base64_decode"],
+  "entry_backend": "dist/backend.js",
+  "entry_frontend": "dist/frontend.js",
+  "minimum_lumiverse_version": "0.1.0"
+}
