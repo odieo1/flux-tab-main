@@ -98,12 +98,13 @@ async function generateOne(
     : Math.floor(Math.random() * 1000000000) + index
 
   const url = new URL('https://image.pollinations.ai/prompt/' + encodeURIComponent(finalPrompt))
-  url.searchParams.set('model', 'kontext')
+  url.searchParams.set('model', 'zimage')
   url.searchParams.set('seed', String(seed))
   url.searchParams.set('nologo', 'true')
   url.searchParams.set('private', 'true')
-  url.searchParams.set('enhance', 'false')
+  url.searchParams.set('enhance', 'true')
   url.searchParams.set('safe', 'false')
+  url.searchParams.set('nsfw', 'true')
 
   const response = await fetch(url.toString(), {
     method: 'GET',
